@@ -25,13 +25,17 @@
 #include <Wire.h>
 #include <math.h>
 
-// ─── Pin Definitions ────────────────────────────────────────
-#define RED_LED 2
+// ─── Pin Definitions (PWM pins for smooth fading) ───────────
+#define RED_LED 5
 #define BLUE_LED 3
-#define GREEN_LED 4
+#define GREEN_LED 6
 #define BUZZER 13
 #define LDR_PIN A0
 #define BUTTON_PIN 12
+
+// ─── Animation Constants ────────────────────────────────────
+#define ANIM_STEP_MS 15 // ms between animation frames
+#define ANIM_SPEED 2    // color increment per step
 
 // ─── Common Anode Helpers (inverted logic) ──────────────────
 #define LED_ON LOW
@@ -189,14 +193,112 @@ void beepSettings() {
 // ═══════════════════════════════════════════════════════════
 
 void allLedsOff() {
-  digitalWrite(RED_LED, LED_OFF);
-  digitalWrite(GREEN_LED, LED_OFF);
-  digitalWrite(BLUE_LED, LED_OFF);
+  // For PWM pins, 255 = fully OFF on common anode
+  analogWrite(RED_LED, 255);
+  analogWrite(GREEN_LED, 255);
+  analogWrite(BLUE_LED, 255);
 }
 
-void ledOn(int pin) { digitalWrite(pin, LED_ON); }
+void ledOn(int pin) {
+  analogWrite(pin, 0); // 0 = full brightness on common anode
+}
 
-void ledOff(int pin) { digitalWrite(pin, LED_OFF); }
+void ledOff(int pin) {
+  analogWrite(pin, 255); // 255 = off on common anode
+}
+
+/*
+ * setRGB()
+ * Sets RGB color with 0-255 brightness values.
+ * Inverts for common anode: 0 brightness = 255 PWM (off),
+ * 255 brightness = 0 PWM (full on).
+ */
+void setRGB(byte r, byte g, byte b) {
+  analogWrite(RED_LED, 255 - r);
+  analogWrite(GREEN_LED, 255 - g);
+  analogWrite(BLUE_LED, 255 - b);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RAINBOW  ANIMATION  (non-blocking)
+// ═══════════════════════════════════════════════════════════
+
+unsigned int animHue = 0; // 0-1535 for full rainbow cycle
+unsigned long lastAnimStep = 0;
+
+/*
+ * hueToRGB()
+ * Converts a hue value (0-1535) to smooth RGB.
+ * 6 phases: R→Y→G→C→B→M→R
+ */
+void hueToRGB(unsigned int hue, byte &r, byte &g, byte &b) {
+  unsigned int phase = hue / 256;
+  byte fade = hue % 256;
+
+  switch (phase) {
+  case 0:
+    r = 255;
+    g = fade;
+    b = 0;
+    break; // Red → Yellow
+  case 1:
+    r = 255 - fade;
+    g = 255;
+    b = 0;
+    break; // Yellow → Green
+  case 2:
+    r = 0;
+    g = 255;
+    b = fade;
+    break; // Green → Cyan
+  case 3:
+    r = 0;
+    g = 255 - fade;
+    b = 255;
+    break; // Cyan → Blue
+  case 4:
+    r = fade;
+    g = 0;
+    b = 255;
+    break; // Blue → Magenta
+  case 5:
+    r = 255;
+    g = 0;
+    b = 255 - fade;
+    break; // Magenta → Red
+  default:
+    r = 255;
+    g = 0;
+    b = 0;
+    break;
+  }
+}
+
+/*
+ * updateAnimation()
+ * Call every loop iteration. Advances the rainbow
+ * smoothly if enough time has passed.
+ */
+void updateAnimation() {
+  unsigned long now = millis();
+  if (now - lastAnimStep < ANIM_STEP_MS)
+    return;
+  lastAnimStep = now;
+
+  byte r, g, b;
+  hueToRGB(animHue, r, g, b);
+  setRGB(r, g, b);
+
+  animHue += ANIM_SPEED;
+  if (animHue >= 1536)
+    animHue = 0;
+}
+
+/*
+ * stopAnimation()
+ * Instantly stops the animation and turns off all LEDs.
+ */
+void stopAnimation() { allLedsOff(); }
 
 // ═══════════════════════════════════════════════════════════
 //  LCD  HELPERS
@@ -316,7 +418,7 @@ void measureAllChannels(float *readings) {
   for (int i = 0; i < 3; i++) {
     // Turn off all LEDs first (dark settle)
     allLedsOff();
-    delay(1000);
+    delay(500);
 
     // Turn ON this channel's LED — it stays on the whole time
     ledOn(ledPins[i]);
@@ -332,7 +434,7 @@ void measureAllChannels(float *readings) {
     for (int d = 0; d < 3; d++) {
       lcd.setCursor(12, 1);
       lcd.print(dots[d]);
-      delay(300);
+      delay(200);
     }
 
     // Take averaged readings (LED is already on and settled)
@@ -499,6 +601,30 @@ void setup() {
 
 void loop() {
   ButtonEvent btn = readButton();
+
+  // Run rainbow animation during idle states
+  if (btn == BTN_NONE) {
+    switch (currentState) {
+    case STATE_WELCOME:
+    case STATE_SETTINGS:
+    case STATE_CAL_BLANK:
+    case STATE_CAL_DONE:
+    case STATE_STD_MENU:
+    case STATE_STD_MODE_SELECT:
+    case STATE_SET_CONC_MANUAL:
+    case STATE_SET_CONC_PRESET:
+    case STATE_STD_DONE:
+    case STATE_MEASURE_SAMPLE:
+    case STATE_RESULTS:
+      updateAnimation();
+      break;
+    default:
+      break;
+    }
+  } else {
+    // Button was pressed — stop animation immediately
+    stopAnimation();
+  }
 
   switch (currentState) {
 
