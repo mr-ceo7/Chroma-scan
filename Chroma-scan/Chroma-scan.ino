@@ -9,10 +9,9 @@
  *  Hardware:
  *    - Arduino Nano
  *    - I2C LCD 16x2 (addr 0x27)
- *    - Common Anode RGB LED (LOW=ON, HIGH=OFF)
- *      - Red   → pin 2
- *      - Blue  → pin 3
- *      - Green → pin 4
+ *    - Red LED    → pin 2
+ *    - Blue LED   → pin 3
+ *    - Green LED  → pin 4
  *    - Buzzer+LED → pin 13
  *    - LDR + 1kΩ voltage divider → A0
  *    - Push button → pin 12 (active HIGH)
@@ -32,10 +31,6 @@
 #define BUZZER 13
 #define LDR_PIN A0
 #define BUTTON_PIN 12
-
-// ─── Common Anode Helpers (inverted logic) ──────────────────
-#define LED_ON LOW
-#define LED_OFF HIGH
 
 // ─── Timing Constants ───────────────────────────────────────
 #define DEBOUNCE_MS 50
@@ -185,20 +180,6 @@ void beepSettings() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  LED  HELPERS  (Common Anode)
-// ═══════════════════════════════════════════════════════════
-
-void allLedsOff() {
-  digitalWrite(RED_LED, LED_OFF);
-  digitalWrite(GREEN_LED, LED_OFF);
-  digitalWrite(BLUE_LED, LED_OFF);
-}
-
-void ledOn(int pin) { digitalWrite(pin, LED_ON); }
-
-void ledOff(int pin) { digitalWrite(pin, LED_OFF); }
-
-// ═══════════════════════════════════════════════════════════
 //  LCD  HELPERS
 // ═══════════════════════════════════════════════════════════
 
@@ -212,6 +193,7 @@ void lcdPrint(const char *line1, const char *line2) {
 
 void lcdPrintLine(int row, const char *text) {
   lcd.setCursor(0, row);
+  // Clear the row first
   lcd.print("                ");
   lcd.setCursor(0, row);
   lcd.print(text);
@@ -225,7 +207,7 @@ ButtonEvent readButton() {
   static bool lastState = LOW;
   static unsigned long pressStart = 0;
   static bool pressed = false;
-  static bool longConfirmed = false;
+  static bool longConfirmed = false; // true once long-press tone has played
 
   bool current = digitalRead(BUTTON_PIN);
 
@@ -254,6 +236,7 @@ ButtonEvent readButton() {
     unsigned long duration = millis() - pressStart;
 
     if (longConfirmed) {
+      // Already confirmed as long press
       lastState = current;
       beepClick();
       return BTN_LONG;
@@ -278,15 +261,16 @@ ButtonEvent readButton() {
  * Turns on a single LED, waits for the LDR to settle,
  * takes multiple readings and returns the average.
  * All other LEDs are OFF during measurement.
- * Uses inverted logic for common anode RGB LED.
  */
 float measureLight(int ledPin) {
   // Ensure all LEDs are off first
-  allLedsOff();
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BLUE_LED, LOW);
   delay(50); // dark settle
 
   // Turn on target LED
-  ledOn(ledPin);
+  digitalWrite(ledPin, HIGH);
   delay(SETTLE_TIME_MS);
 
   // Take averaged readings
@@ -296,7 +280,7 @@ float measureLight(int ledPin) {
     delay(SAMPLE_DELAY_MS);
   }
 
-  ledOff(ledPin);
+  digitalWrite(ledPin, LOW);
   delay(50); // dark recovery
 
   return (float)total / NUM_SAMPLES;
@@ -315,11 +299,13 @@ void measureAllChannels(float *readings) {
 
   for (int i = 0; i < 3; i++) {
     // Turn off all LEDs first (dark settle)
-    allLedsOff();
-    delay(1000);
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BLUE_LED, LOW);
+    delay(50);
 
     // Turn ON this channel's LED — it stays on the whole time
-    ledOn(ledPins[i]);
+    digitalWrite(ledPins[i], HIGH);
 
     // Show which channel is being measured
     lcd.setCursor(0, 1);
@@ -354,7 +340,7 @@ void measureAllChannels(float *readings) {
     delay(700);
 
     // Now turn off the LED before next channel
-    ledOff(ledPins[i]);
+    digitalWrite(ledPins[i], LOW);
     delay(100);
   }
 
@@ -409,7 +395,7 @@ bool linearRegression() {
 
   float denom = (n * sumX2 - sumX * sumX);
   if (abs(denom) < 1e-10)
-    return false;
+    return false; // vertical line / no spread
 
   slopeM = (n * sumXY - sumX * sumY) / denom;
   interceptB = (sumY - slopeM * sumX) / n;
@@ -432,12 +418,20 @@ float calcConcentration(float abs_val) {
 //  CONCENTRATION  ENTRY  HELPERS
 // ═══════════════════════════════════════════════════════════
 
+/*
+ * digitsToConc()
+ * Converts the 5-digit array (XXX.XX) to a float.
+ */
 float digitsToConc() {
   float val = concDigits[0] * 100.0 + concDigits[1] * 10.0 +
               concDigits[2] * 1.0 + concDigits[3] * 0.1 + concDigits[4] * 0.01;
   return val;
 }
 
+/*
+ * displayConcEntry()
+ * Shows the current digit entry on LCD with cursor indicator.
+ */
 void displayConcEntry() {
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -446,10 +440,16 @@ void displayConcEntry() {
   lcd.print("):");
 
   lcd.setCursor(0, 1);
+  // Format: XXX.XX
   char buf[10];
   snprintf(buf, sizeof(buf), "%d%d%d.%d%d", concDigits[0], concDigits[1],
            concDigits[2], concDigits[3], concDigits[4]);
   lcd.print(buf);
+
+  // Show cursor position indicator
+  lcd.setCursor(10, 1);
+  lcd.print("^");
+  lcd.setCursor(10, 1);
 
   // Position the blinking cursor under the active digit
   int cursorCol = concDigitPos;
@@ -471,8 +471,10 @@ void setup() {
   pinMode(BUZZER, OUTPUT);
   pinMode(BUTTON_PIN, INPUT); // external pull-down assumed
 
-  // All LEDs off (HIGH for common anode)
-  allLedsOff();
+  // All LEDs off
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BLUE_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
 
   // LCD init
   lcd.init();
@@ -515,6 +517,7 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_SETTINGS:
     if (btn == BTN_SHORT) {
+      // Cycle through units
       currentUnit = (UnitType)((currentUnit + 1) % UNIT_COUNT);
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -585,6 +588,7 @@ void loop() {
         lcdPrint("Entry mode:", "Srt:Manual Lng:Pre");
       }
     } else if (btn == BTN_LONG) {
+      // Done adding standards → proceed to measurement
       if (numStandards >= 2) {
         curveValid = linearRegression();
         if (curveValid) {
@@ -592,6 +596,8 @@ void loop() {
           lcd.setCursor(0, 0);
           lcd.print("Curve ready!");
           lcd.setCursor(0, 1);
+          char buf[17];
+          // Show slope info
           lcd.print("m=");
           lcd.print(slopeM, 4);
           delay(1500);
@@ -601,6 +607,7 @@ void loop() {
           delay(1500);
         }
       } else if (numStandards == 0) {
+        // No cal curve - direct measurement only
         curveValid = false;
       } else {
         lcdPrint("Need min 2 stds", "Add more or skip");
@@ -616,12 +623,14 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_STD_MODE_SELECT:
     if (btn == BTN_SHORT) {
+      // Manual digit entry
       stdEntryMode = 0;
       concDigitPos = 0;
       memset(concDigits, 0, sizeof(concDigits));
       currentState = STATE_SET_CONC_MANUAL;
       displayConcEntry();
     } else if (btn == BTN_LONG) {
+      // Preset selection
       stdEntryMode = 1;
       presetIndex = 0;
       currentState = STATE_SET_CONC_PRESET;
@@ -640,11 +649,14 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_SET_CONC_MANUAL:
     if (btn == BTN_SHORT) {
+      // Increment current digit (0-9)
       concDigits[concDigitPos] = (concDigits[concDigitPos] + 1) % 10;
       displayConcEntry();
     } else if (btn == BTN_LONG) {
+      // Move to next digit or confirm
       concDigitPos++;
       if (concDigitPos >= 5) {
+        // All digits entered → measure this standard
         manualConc = digitsToConc();
         lcd.noBlink();
         lcd.clear();
@@ -656,9 +668,11 @@ void loop() {
 
         currentState = STATE_MEASURE_STD;
 
+        // Perform measurement
         float readings[3];
         measureAllChannels(readings);
 
+        // Find best channel (highest absorbance)
         float bestAbs = 0;
         int bestCh = 0;
         for (int i = 0; i < 3; i++) {
@@ -669,6 +683,7 @@ void loop() {
           }
         }
 
+        // Store calibration point (use best channel absorbance)
         stdConcentrations[numStandards] = manualConc;
         stdAbsorbances[numStandards] = bestAbs;
         numStandards++;
@@ -691,7 +706,7 @@ void loop() {
         lcd.print("A=");
         lcd.print(bestAbs, 4);
         lcd.print(" @");
-        lcd.print(channelNames[bestCh][0]);
+        lcd.print(channelNames[bestCh][0]); // R, G, or B
 
         beepStdSaved();
         currentState = STATE_STD_DONE;
@@ -704,6 +719,7 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_SET_CONC_PRESET:
     if (btn == BTN_SHORT) {
+      // Cycle through presets
       presetIndex = (presetIndex + 1) % NUM_PRESETS;
       lcd.setCursor(0, 1);
       lcd.print("                ");
@@ -713,6 +729,7 @@ void loop() {
       lcd.print(" ");
       lcd.print(unitLabels[currentUnit]);
     } else if (btn == BTN_LONG) {
+      // Confirm preset → measure this standard
       float selectedConc = PRESETS[presetIndex];
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -723,9 +740,11 @@ void loop() {
 
       currentState = STATE_MEASURE_STD;
 
+      // Perform measurement
       float readings[3];
       measureAllChannels(readings);
 
+      // Find best channel
       float bestAbs = 0;
       int bestCh = 0;
       for (int i = 0; i < 3; i++) {
@@ -736,6 +755,7 @@ void loop() {
         }
       }
 
+      // Store
       stdConcentrations[numStandards] = selectedConc;
       stdAbsorbances[numStandards] = bestAbs;
       numStandards++;
@@ -773,6 +793,7 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_STD_DONE:
     if (btn == BTN_SHORT) {
+      // Return to standards menu
       currentState = STATE_STD_MENU;
       char buf[17];
       snprintf(buf, sizeof(buf), "Standards: %d/%d", numStandards,
@@ -846,9 +867,11 @@ void loop() {
   // ─────────────────────────────────────────────────────
   case STATE_RESULTS:
     if (btn == BTN_SHORT) {
+      // Cycle through result pages
       resultPage = (resultPage + 1) % RESULT_PAGES;
       displayResultPage();
     } else if (btn == BTN_LONG) {
+      // New sample measurement
       currentState = STATE_MEASURE_SAMPLE;
       lcdPrint("Insert SAMPLE", "Press to measure");
     }
@@ -862,6 +885,8 @@ void loop() {
 
 void displayResultPage() {
   lcd.clear();
+  char line1[17];
+  char line2[17];
 
   switch (resultPage) {
   case 0: // Red Absorbance
