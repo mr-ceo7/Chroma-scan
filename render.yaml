@@ -2,5 +2,6 @@ services:
   - type: web
     name: chroma-train-server
     env: python
+    plan: free
     buildCommand: "pip install -r chroma-train-server/requirements.txt"
     startCommand: "gunicorn --bind 0.0.0.0:$PORT --chdir chroma-train-server app:app"
