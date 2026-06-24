@@ -22,6 +22,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "animations.h"
 
 // ─── OLED Configuration ─────────────────────────────────────
 #define SCREEN_WIDTH 128
@@ -55,23 +56,39 @@ struct ModelParams {
   bool loaded = false;
 };
 ModelParams activeModel;
+bool flashDone = false;
+bool uploadError = false;
+bool showCalibWarning = false;
+bool showModelWarning = false;
+bool showCalibError = false;
+int predictModelIndex = 0;
 
 // ─── State Machine ──────────────────────────────────────────
 enum State {
   STATE_WELCOME,
   STATE_MAIN_MENU,
+  
+  // App 1: Calibration
   STATE_CAL_BLANK_PROMPT,
   STATE_CAL_BLANK_SCANNING,
   STATE_CAL_BLANK_DONE,
-  STATE_ADD_STD_MENU,
-  STATE_ADD_STD_PRESET,
-  STATE_ADD_STD_MANUAL,
-  STATE_ADD_STD_SCANNING,
-  STATE_ADD_STD_DONE,
-  STATE_MEASURE_SAMPLE_PROMPT,
-  STATE_MEASURE_SAMPLE_SCANNING,
-  STATE_MEASURE_SAMPLE_RESULTS,
-  STATE_WIFI_PORTAL,
+  
+  // App 2: AI Dataset Studio (Training App)
+  STATE_TRAIN_AP_ACTIVE,
+  STATE_TRAIN_CHOOSE_METHOD,
+  STATE_TRAIN_PRESET,
+  STATE_TRAIN_MANUAL,
+  STATE_TRAIN_SCANNING,
+  STATE_TRAIN_SCAN_DONE,
+  STATE_MODEL_FLASHING,
+  
+  // App 3: Edge AI Prediction (Inference App)
+  STATE_PREDICT_MODEL_SELECT,
+  STATE_PREDICT_PROMPT,
+  STATE_PREDICT_SCANNING,
+  STATE_PREDICT_THINKING,
+  STATE_PREDICT_RESULTS,
+  
   STATE_SETTINGS
 };
 State currentState = STATE_WELCOME;
@@ -241,6 +258,35 @@ bool loadModelParams() {
 // ═══════════════════════════════════════════════════════════
 
 void saveStandard(float conc, float ambient, float r, float g, float b) {
+  // 1. Check Heap memory safety
+  if (ESP.getFreeHeap() < 6144) {
+    Serial.println("DEBUG: Low heap memory. Postponing saveStandard.");
+    return;
+  }
+  
+  // 2. Check File System Space (at least 15KB free space)
+  FSInfo fs_info;
+  if (LittleFS.info(fs_info)) {
+    size_t freeSpace = fs_info.totalBytes - fs_info.usedBytes;
+    if (freeSpace < 15360) {
+      Serial.println("DEBUG: LittleFS storage space critically low! Cannot save standard.");
+      return;
+    }
+  }
+  
+  // 3. Limit File Size of standards.csv to 50KB to avoid filling up disk
+  if (LittleFS.exists("/standards.csv")) {
+    File checkFile = LittleFS.open("/standards.csv", "r");
+    if (checkFile) {
+      size_t fileSize = checkFile.size();
+      checkFile.close();
+      if (fileSize >= 51200) {
+        Serial.println("DEBUG: standards.csv file size limit reached (50KB). Clear standard points first.");
+        return;
+      }
+    }
+  }
+  
   bool exists = LittleFS.exists("/standards.csv");
   File file = LittleFS.open("/standards.csv", "a");
   if (!file) {
@@ -250,8 +296,12 @@ void saveStandard(float conc, float ambient, float r, float g, float b) {
   if (!exists) {
     file.println("molarity,ambient,red,green,blue");
   }
-  file.printf("%.4f,%.2f,%.2f,%.2f,%.2f\n", conc, ambient, r, g, b);
+  int bytesWritten = file.printf("%.4f,%.2f,%.2f,%.2f,%.2f\n", conc, ambient, r, g, b);
   file.close();
+  
+  if (bytesWritten <= 0) {
+    Serial.println("DEBUG: Write failed (0 bytes written to standards.csv).");
+  }
 }
 
 void clearStandards() {
@@ -776,6 +826,10 @@ const char HTTP_INDEX[] PROGMEM = R"raw(
               Deploy Model to Edge
             </button>
           </form>
+          <button type="button" class="btn btn-danger" id="delete-model-btn" style="margin-top: 10px; display: none;" onclick="deleteModel()">
+            <svg style="width:18px;height:18px;fill:currentColor" viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+            Delete Active Model
+          </button>
           <div class="deploy-status" id="deploy-status"></div>
         </div>
       </div>
@@ -1101,6 +1155,10 @@ const char HTTP_INDEX[] PROGMEM = R"raw(
           
           document.getElementById('model-type').textContent = status.model_loaded ? status.model_type.toUpperCase() : 'NONE (DEFAULT)';
           document.getElementById('model-pill').classList.toggle('active', status.model_loaded);
+          const deleteBtn = document.getElementById('delete-model-btn');
+          if (deleteBtn) {
+            deleteBtn.style.display = status.model_loaded ? 'inline-flex' : 'none';
+          }
           document.getElementById('unit-display').textContent = unit;
           document.getElementById('ref-display').textContent = `R:${i0.r.toFixed(0)} G:${i0.g.toFixed(0)} B:${i0.b.toFixed(0)}`;
         }
@@ -1214,6 +1272,32 @@ const char HTTP_INDEX[] PROGMEM = R"raw(
       }
     }
 
+    async function deleteModel() {
+      if (confirm("Are you sure you want to delete the active model from the device?")) {
+        const status = document.getElementById('deploy-status');
+        status.textContent = 'Deleting active model...';
+        status.style.color = 'var(--text-muted)';
+        try {
+          const res = await fetch('/delete_model', { method: 'POST' });
+          if (res.ok) {
+            status.textContent = 'Model deleted successfully.';
+            status.style.color = 'var(--success)';
+            setTimeout(() => {
+              status.textContent = '';
+              fetchData();
+            }, 2000);
+          } else {
+            const txt = await res.text();
+            status.textContent = `Deletion Error: ${txt}`;
+            status.style.color = 'var(--danger)';
+          }
+        } catch (err) {
+          status.textContent = `Network Error: ${err.message}`;
+          status.style.color = 'var(--danger)';
+        }
+      }
+    }
+
     // Initialize
     window.addEventListener('resize', resizeCanvas);
     window.addEventListener('DOMContentLoaded', () => {
@@ -1267,11 +1351,37 @@ void handleClearData() {
 void handleUploadModel() {
   HTTPUpload& upload = server.upload();
   if (upload.status == UPLOAD_FILE_START) {
+    uploadError = false;
+    
+    // Check heap space
+    if (ESP.getFreeHeap() < 8192) {
+      Serial.println("DEBUG: Out of memory during upload startup.");
+      uploadError = true;
+      server.send(503, "text/plain", "Error: Out of heap memory. Please reboot the device.");
+      return;
+    }
+    
     String filename = upload.filename;
     if (!filename.endsWith(".json")) {
+      uploadError = true;
       server.send(400, "text/plain", "Invalid file extension. Only .json allowed.");
       return;
     }
+    
+    // Check LittleFS space (ensure we have at least 20KB space)
+    FSInfo fs_info;
+    if (LittleFS.info(fs_info)) {
+      size_t freeSpace = fs_info.totalBytes - fs_info.usedBytes;
+      if (freeSpace < 20480) {
+        Serial.println("DEBUG: LittleFS storage full for model upload.");
+        uploadError = true;
+        server.send(507, "text/plain", "Error: Storage full. Please clear standards CSV.");
+        return;
+      }
+    }
+    
+    changeState(STATE_MODEL_FLASHING);
+    flashDone = false;
     // Delete old file if exists
     if (LittleFS.exists("/model_params.json")) {
       LittleFS.remove("/model_params.json");
@@ -1279,24 +1389,71 @@ void handleUploadModel() {
     // Open new file
     File file = LittleFS.open("/model_params.json", "w");
     if (!file) {
+      uploadError = true;
       server.send(500, "text/plain", "Failed to open params file for writing.");
       return;
     }
     file.close();
   } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (uploadError) return;
+    
+    // Check space before appending chunk + 2KB safety margin
+    FSInfo fs_info;
+    if (LittleFS.info(fs_info)) {
+      size_t freeSpace = fs_info.totalBytes - fs_info.usedBytes;
+      if (freeSpace < upload.currentSize + 2048) {
+        Serial.println("DEBUG: Storage space exhausted during model upload write.");
+        uploadError = true;
+        return;
+      }
+    }
+    
     File file = LittleFS.open("/model_params.json", "a");
     if (file) {
-      file.write(upload.buf, upload.currentSize);
+      size_t written = file.write(upload.buf, upload.currentSize);
       file.close();
+      if (written < upload.currentSize) {
+        Serial.println("DEBUG: Incomplete write block. Storage full.");
+        uploadError = true;
+      }
+    } else {
+      Serial.println("DEBUG: Failed to open params file for append.");
+      uploadError = true;
     }
   } else if (upload.status == UPLOAD_FILE_END) {
+    if (uploadError) {
+      changeState(STATE_TRAIN_AP_ACTIVE);
+      server.send(500, "text/plain", "Error: Write error occurred during file upload. Check storage space.");
+      return;
+    }
     if (loadModelParams()) {
+      flashDone = true;
+      stateStartTime = millis();
+      triggerBeep("SUCCESS");
       server.sendHeader("Location", "/");
       server.send(303);
     } else {
+      changeState(STATE_TRAIN_AP_ACTIVE);
       server.send(400, "text/plain", "Failed to parse parameters. Ensure it is a valid model_params.json.");
     }
   }
+}
+
+void handleDeleteModel() {
+  if (LittleFS.exists("/model_params.json")) {
+    LittleFS.remove("/model_params.json");
+  }
+  activeModel.loaded = false;
+  activeModel.modelType = "linear";
+  for (int i = 0; i < 5; i++) activeModel.lin_w[i] = 0.0;
+  activeModel.mlp_b2 = 0.0;
+  for (int i = 0; i < 8; i++) {
+    for (int j = 0; j < 4; j++) activeModel.mlp_w1[i][j] = 0.0;
+    activeModel.mlp_b1[i] = 0.0;
+    activeModel.mlp_w2[i] = 0.0;
+  }
+  Serial.println("DEBUG: AI model deleted from disk and memory.");
+  server.send(200, "text/plain", "Model deleted successfully.");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1305,7 +1462,23 @@ void handleUploadModel() {
 
 void changeState(State newState) {
   // Exit actions
-  if (currentState == STATE_WIFI_PORTAL && newState != STATE_WIFI_PORTAL) {
+  bool currentIsTrain = (currentState == STATE_TRAIN_AP_ACTIVE ||
+                         currentState == STATE_TRAIN_CHOOSE_METHOD ||
+                         currentState == STATE_TRAIN_PRESET ||
+                         currentState == STATE_TRAIN_MANUAL ||
+                         currentState == STATE_TRAIN_SCANNING ||
+                         currentState == STATE_TRAIN_SCAN_DONE ||
+                         currentState == STATE_MODEL_FLASHING);
+                         
+  bool newIsTrain = (newState == STATE_TRAIN_AP_ACTIVE ||
+                     newState == STATE_TRAIN_CHOOSE_METHOD ||
+                     newState == STATE_TRAIN_PRESET ||
+                     newState == STATE_TRAIN_MANUAL ||
+                     newState == STATE_TRAIN_SCANNING ||
+                     newState == STATE_TRAIN_SCAN_DONE ||
+                     newState == STATE_MODEL_FLASHING);
+                     
+  if (currentIsTrain && !newIsTrain) {
     server.stop();
     WiFi.softAPdisconnect(true);
     wifiPortalActive = false;
@@ -1315,7 +1488,7 @@ void changeState(State newState) {
   stateStartTime = millis();
   
   // Enter actions
-  if (currentState == STATE_WIFI_PORTAL) {
+  if (newIsTrain && !wifiPortalActive) {
     WiFi.mode(WIFI_AP);
     WiFi.softAP("Chroma-Scan-AP", "chromascan123");
     server.begin();
@@ -1575,16 +1748,15 @@ void renderState() {
       }
       
       // Draw items
-      for (int idx = 0; idx < 5; idx++) {
+      for (int idx = 0; idx < 4; idx++) {
         int xOffset = 48 + (int)round((idx - smoothMenuIndex) * 128.0);
         if (xOffset < -32 || xOffset > 128) continue;
         
         // Draw Icon
         if (idx == 0) drawCalibrateIcon(xOffset, 14);
-        else if (idx == 1) drawMeasureIcon(xOffset, 14);
-        else if (idx == 2) drawAddStdIcon(xOffset, 14);
-        else if (idx == 3) drawWiFiIcon(xOffset, 14);
-        else if (idx == 4) drawSettingsIcon(xOffset, 14);
+        else if (idx == 1) drawWiFiIcon(xOffset, 14);
+        else if (idx == 2) drawMeasureIcon(xOffset, 14);
+        else if (idx == 3) drawSettingsIcon(xOffset, 14);
         
         // Draw Text Label centered below the icon
         display.setTextColor(SSD1306_WHITE);
@@ -1592,25 +1764,17 @@ void renderState() {
           display.setCursor(xOffset + 16 - 45, 43);
           display.print(F("Calibrate Blank"));
         } else if (idx == 1) {
-          if (!isCalibrated) {
-            display.setCursor(xOffset + 16 - 54, 43);
-            display.print(F("Measure Sample [!]"));
-          } else {
-            display.setCursor(xOffset + 16 - 42, 43);
-            display.print(F("Measure Sample"));
-          }
+          display.setCursor(xOffset + 16 - 48, 43);
+          display.print(F("AI Dataset Studio"));
         } else if (idx == 2) {
           if (!isCalibrated) {
-            display.setCursor(xOffset + 16 - 48, 43);
-            display.print(F("Add Standard [!]"));
+            display.setCursor(xOffset + 16 - 51, 43);
+            display.print(F("Edge AI Predict [!]"));
           } else {
-            display.setCursor(xOffset + 16 - 36, 43);
-            display.print(F("Add Standard"));
+            display.setCursor(xOffset + 16 - 39, 43);
+            display.print(F("Edge AI Predict"));
           }
         } else if (idx == 3) {
-          display.setCursor(xOffset + 16 - 42, 43);
-          display.print(F("WiFi AP Portal"));
-        } else if (idx == 4) {
           display.setCursor(xOffset + 16 - 24, 43);
           display.print(F("Settings"));
         }
@@ -1620,11 +1784,41 @@ void renderState() {
       if (menuIndex > 0) {
         display.fillTriangle(4, 26, 8, 23, 8, 29, SSD1306_WHITE);
       }
-      if (menuIndex < 4) {
+      if (menuIndex < 3) {
         display.fillTriangle(123, 26, 119, 23, 119, 29, SSD1306_WHITE);
       }
       
       drawBottomBar("BACK", "OK Select");
+      
+      if (showCalibWarning) {
+        display.fillRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_BLACK);
+        display.drawRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(1);
+        display.setCursor(20, 14);
+        display.print(F(" [!] UNCALIBRATED"));
+        display.setCursor(20, 26);
+        display.print(F("Run Calibration"));
+        display.setCursor(20, 36);
+        display.print(F("first before using"));
+        display.setCursor(20, 46);
+        display.print(F("Edge AI Predict."));
+      }
+      
+      if (showCalibError) {
+        display.fillRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_BLACK);
+        display.drawRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(1);
+        display.setCursor(20, 14);
+        display.print(F(" [!] CALIB ERROR"));
+        display.setCursor(20, 26);
+        display.print(F("Light level too low!"));
+        display.setCursor(20, 36);
+        display.print(F("Check cuvette path &"));
+        display.setCursor(20, 46);
+        display.print(F("ensure blank solvent."));
+      }
       break;
 
     case STATE_CAL_BLANK_PROMPT:
@@ -1640,33 +1834,32 @@ void renderState() {
       break;
 
     case STATE_CAL_BLANK_SCANNING:
-    case STATE_MEASURE_SAMPLE_SCANNING:
-    case STATE_ADD_STD_SCANNING:
+    case STATE_TRAIN_SCANNING:
+    case STATE_PREDICT_SCANNING: {
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
       if (currentState == STATE_CAL_BLANK_SCANNING)
         display.print(F("CALIBRATING BLANK"));
-      else if (currentState == STATE_ADD_STD_SCANNING)
+      else if (currentState == STATE_TRAIN_SCANNING)
         display.print(F("SCANNING STANDARD"));
       else
         display.print(F("MEASURING SAMPLE"));
-      drawScanningLaser(10, 18, 18, 24, animLaserY % 20);
-      display.setCursor(38, 18);
-      display.print(F("Channel:"));
-      display.setTextSize(2);
-      display.setCursor(38, 28);
+        
+      int frameIdx = (millis() / 42) % SCAN_FRAME_COUNT;
+      display.drawBitmap(48, 14, scan_frames[frameIdx], 32, 32, SSD1306_WHITE);
+      
+      display.setCursor(6, 48);
       if (scanStep >= 1 && scanStep <= 4) {
-        if (scanStep == 1) display.print(F("Ambient"));
-        else if (scanStep == 2) display.print(F("Red"));
-        else if (scanStep == 3) display.print(F("Green"));
-        else if (scanStep == 4) display.print(F("Blue"));
+        if (scanStep == 1) display.print(F("Reading Ambient..."));
+        else if (scanStep == 2) display.print(F("Reading Red..."));
+        else if (scanStep == 3) display.print(F("Reading Green..."));
+        else if (scanStep == 4) display.print(F("Reading Blue..."));
       } else {
-        display.print(F("Done"));
+        display.print(F("Scan Completed."));
       }
-      display.setTextSize(1);
-      drawScanProgress(scanStep);
       break;
+    }
 
     case STATE_CAL_BLANK_DONE:
       display.setTextColor(SSD1306_WHITE);
@@ -1687,11 +1880,29 @@ void renderState() {
       drawBottomBar(NULL, "OK Next");
       break;
 
-    case STATE_ADD_STD_MENU:
+    case STATE_TRAIN_AP_ACTIVE: {
+      int frameIdx = (millis() / 42) % LIVESYNC_FRAME_COUNT;
+      display.drawBitmap(8, 8, live_sync_frames[frameIdx], 48, 48, SSD1306_WHITE);
+      
+      display.setTextColor(SSD1306_WHITE);
+      display.setCursor(64, 10);
+      display.print(F("STUDIO AP"));
+      display.setCursor(64, 22);
+      display.print(F("SSID:"));
+      display.setCursor(64, 30);
+      display.print(F("Chroma-Scan"));
+      display.setCursor(64, 40);
+      display.print(F("IP:192.168.4.1"));
+      
+      drawBottomBar("EXIT AP", "OK Collect");
+      break;
+    }
+
+    case STATE_TRAIN_CHOOSE_METHOD:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
-      display.print(F("ADD STANDARD POINT"));
+      display.print(F("CHOOSE ENTRY METHOD"));
       for (int i = 0; i < 2; i++) {
         int y = 20 + i * 12;
         display.setTextColor(SSD1306_WHITE);
@@ -1705,7 +1916,7 @@ void renderState() {
       drawBottomBar("BACK", "OK Next");
       break;
 
-    case STATE_ADD_STD_PRESET:
+    case STATE_TRAIN_PRESET:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
@@ -1730,7 +1941,7 @@ void renderState() {
       drawBottomBar("BACK", "OK Scan");
       break;
 
-    case STATE_ADD_STD_MANUAL:
+    case STATE_TRAIN_MANUAL:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
@@ -1755,7 +1966,7 @@ void renderState() {
       drawBottomBar("BACK", "OK Next");
       break;
 
-    case STATE_ADD_STD_DONE:
+    case STATE_TRAIN_SCAN_DONE:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
@@ -1770,7 +1981,78 @@ void renderState() {
       drawBottomBar(NULL, "OK Next");
       break;
 
-    case STATE_MEASURE_SAMPLE_PROMPT:
+    case STATE_MODEL_FLASHING: {
+      if (!flashDone) {
+        int frameIdx = (millis() / 42) % DOWNLOAD_FRAME_COUNT;
+        display.drawBitmap(8, 8, download_frames[frameIdx], 48, 48, SSD1306_WHITE);
+        
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(64, 16);
+        display.print(F("FLASHING..."));
+        display.setCursor(64, 28);
+        display.print(F("Downloading"));
+        display.setCursor(64, 40);
+        display.print(F("Model Params"));
+      } else {
+        display.drawBitmap(8, 8, download_frames[DOWNLOAD_FRAME_COUNT - 1], 48, 48, SSD1306_WHITE);
+        drawSmallCheck(48, 8);
+        
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(64, 16);
+        display.print(F("SUCCESS!"));
+        display.setCursor(64, 28);
+        display.print(F("AI Model"));
+        display.setCursor(64, 40);
+        display.print(F("Deployed!"));
+        
+        drawBottomBar(NULL, "OK Done");
+      }
+      break;
+    }
+
+    case STATE_PREDICT_MODEL_SELECT:
+      display.setTextColor(SSD1306_WHITE);
+      display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
+      display.setCursor(6, 2);
+      display.print(F("SELECT PREDICT MODEL"));
+      for (int i = 0; i < 2; i++) {
+        int y = 20 + i * 12;
+        display.setTextColor(SSD1306_WHITE);
+        if (i == predictModelIndex) {
+          display.drawRoundRect(2, y - 1, 124, 11, 2, SSD1306_WHITE);
+          display.fillTriangle(4, y + 1, 4, y + 7, 8, y + 4, SSD1306_WHITE);
+        }
+        display.setCursor(12, y + 1);
+        if (i == 0) {
+          if (activeModel.loaded) {
+            display.print(F("Custom AI: "));
+            display.print(activeModel.modelType == "mlp" ? F("Chroma-MLP") : F("Chroma-LIN"));
+          } else {
+            display.print(F("Custom AI: [None]"));
+          }
+        } else {
+          display.print(F("Beer-Lambert Fallback"));
+        }
+      }
+      drawBottomBar("BACK", "OK Next");
+      
+      if (showModelWarning) {
+        display.fillRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_BLACK);
+        display.drawRect(10, 8, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 16, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+        display.setTextSize(1);
+        display.setCursor(20, 14);
+        display.print(F(" [!] NO AI MODEL"));
+        display.setCursor(20, 26);
+        display.print(F("Please train & upload"));
+        display.setCursor(20, 36);
+        display.print(F("model_params.json"));
+        display.setCursor(20, 46);
+        display.print(F("in Dataset Studio."));
+      }
+      break;
+
+    case STATE_PREDICT_PROMPT:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
@@ -1782,7 +2064,30 @@ void renderState() {
       drawBottomBar("BACK", "OK Go");
       break;
 
-    case STATE_MEASURE_SAMPLE_RESULTS:
+    case STATE_PREDICT_THINKING: {
+      unsigned long elapsed = millis() - stateStartTime;
+      if (elapsed >= 2500) {
+        changeState(STATE_PREDICT_RESULTS);
+      } else {
+        int frameIdx = (millis() / 42) % NEURAL_NET_FRAME_COUNT;
+        display.drawBitmap(8, 8, neural_net_frames[frameIdx], 48, 48, SSD1306_WHITE);
+        
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(64, 16);
+        display.print(F("EDGE AI"));
+        display.setCursor(64, 28);
+        display.print(F("Analyzing..."));
+        display.setCursor(64, 40);
+        if (predictModelIndex == 0 && activeModel.loaded) {
+          display.print(activeModel.modelType == "mlp" ? F("MLP Model") : F("Linear Model"));
+        } else {
+          display.print(F("Fallback Fit"));
+        }
+      }
+      break;
+    }
+
+    case STATE_PREDICT_RESULTS:
       display.setTextColor(SSD1306_WHITE);
       display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
       display.setCursor(6, 2);
@@ -1807,33 +2112,22 @@ void renderState() {
         }
       } else {
         display.setCursor(4, 16);
-        display.print(F("Final Concentration"));
+        if (predictModelIndex == 0 && activeModel.loaded) {
+          display.print(activeModel.modelType == "mlp" ? F("Chroma MLP Model") : F("Chroma Linear Model"));
+        } else {
+          display.print(F("Beer-Lambert Fallback"));
+        }
         display.setTextSize(2);
         display.setCursor(4, 26);
         display.print(concentrationResult, 2);
         display.setTextSize(1);
         display.setCursor(76, 32);
         display.print(UNIT_LABELS[currentUnitIndex]);
-        display.setCursor(4, 42);
+        display.setCursor(4, 44);
         display.print(F("Best channel: "));
         display.print(CHANNEL_NAMES[bestChannel]);
       }
       drawBottomBar("BACK Menu", "Page");
-      break;
-
-    case STATE_WIFI_PORTAL:
-      display.setTextColor(SSD1306_WHITE);
-      display.drawFastHLine(0, 12, SCREEN_WIDTH, SSD1306_WHITE);
-      display.setCursor(6, 2);
-      display.print(F("WIFI PORTAL"));
-      drawWiFiPulsing(108, 32, 5, wifiPulseStep);
-      display.setCursor(4, 18);
-      display.print(F("SSID:"));
-      display.setCursor(4, 28);
-      display.print(F(" Chroma-Scan-AP"));
-      display.setCursor(4, 38);
-      display.print(F("IP: 192.168.4.1"));
-      drawBottomBar("BACK Stop", NULL);
       break;
 
     case STATE_SETTINGS:
@@ -1870,15 +2164,22 @@ void startScan(State scanState) {
 
 void onScanComplete() {
   if (currentState == STATE_CAL_BLANK_SCANNING) {
-    I0[0] = rawR;
-    I0[1] = rawG;
-    I0[2] = rawB;
-    isCalibrated = true;
-    saveStandard(0.0, rawAmbient, rawR, rawG, rawB);
-    beepDone();
-    changeState(STATE_CAL_BLANK_DONE);
+    if (rawR < 50.0 || rawG < 50.0 || rawB < 50.0) {
+      beepError();
+      showCalibError = true;
+      isCalibrated = false;
+      changeState(STATE_MAIN_MENU);
+    } else {
+      I0[0] = rawR;
+      I0[1] = rawG;
+      I0[2] = rawB;
+      isCalibrated = true;
+      saveStandard(0.0, rawAmbient, rawR, rawG, rawB);
+      beepDone();
+      changeState(STATE_CAL_BLANK_DONE);
+    }
   }
-  else if (currentState == STATE_ADD_STD_SCANNING) {
+  else if (currentState == STATE_TRAIN_SCANNING) {
     absorbance[0] = calculateAbsorbance(I0[0], rawR);
     absorbance[1] = calculateAbsorbance(I0[1], rawG);
     absorbance[2] = calculateAbsorbance(I0[2], rawB);
@@ -1890,9 +2191,9 @@ void onScanComplete() {
     
     saveStandard(manualConc, rawAmbient, rawR, rawG, rawB);
     beepDone();
-    changeState(STATE_ADD_STD_DONE);
+    changeState(STATE_TRAIN_SCAN_DONE);
   }
-  else if (currentState == STATE_MEASURE_SAMPLE_SCANNING) {
+  else if (currentState == STATE_PREDICT_SCANNING) {
     absorbance[0] = calculateAbsorbance(I0[0], rawR);
     absorbance[1] = calculateAbsorbance(I0[1], rawG);
     absorbance[2] = calculateAbsorbance(I0[2], rawB);
@@ -1904,7 +2205,7 @@ void onScanComplete() {
     
     concentrationResult = runModelInference(absorbance[0], absorbance[1], absorbance[2], rawAmbient);
     beepDone();
-    changeState(STATE_MEASURE_SAMPLE_RESULTS);
+    changeState(STATE_PREDICT_THINKING);
     resultPage = 0;
   }
 }
@@ -1920,35 +2221,43 @@ void handleButtonPresses(bool up, bool down, bool ok, bool back) {
       break;
       
     case STATE_MAIN_MENU:
+      if (showCalibWarning) {
+        if (up || down || ok || back) {
+          beepClick();
+          showCalibWarning = false;
+        }
+        break;
+      }
+      if (showCalibError) {
+        if (up || down || ok || back) {
+          beepClick();
+          showCalibError = false;
+        }
+        break;
+      }
       if (up) {
         beepClick();
-        menuIndex = (menuIndex - 1 + 5) % 5;
+        menuIndex = (menuIndex - 1 + 4) % 4;
       } else if (down) {
         beepClick();
-        menuIndex = (menuIndex + 1) % 5;
+        menuIndex = (menuIndex + 1) % 4;
       } else if (ok) {
         if (menuIndex == 0) {
           beepClick();
           changeState(STATE_CAL_BLANK_PROMPT);
         } else if (menuIndex == 1) {
-          if (!isCalibrated) {
-            beepError();
-          } else {
-            beepClick();
-            changeState(STATE_MEASURE_SAMPLE_PROMPT);
-          }
+          beepClick();
+          changeState(STATE_TRAIN_AP_ACTIVE);
         } else if (menuIndex == 2) {
           if (!isCalibrated) {
             beepError();
+            showCalibWarning = true;
           } else {
             beepClick();
-            changeState(STATE_ADD_STD_MENU);
-            menuIndex = 0;
+            changeState(STATE_PREDICT_MODEL_SELECT);
+            predictModelIndex = 0;
           }
         } else if (menuIndex == 3) {
-          beepClick();
-          changeState(STATE_WIFI_PORTAL);
-        } else if (menuIndex == 4) {
           beepClick();
           changeState(STATE_SETTINGS);
           menuIndex = 0;
@@ -1976,27 +2285,38 @@ void handleButtonPresses(bool up, bool down, bool ok, bool back) {
       }
       break;
       
-    case STATE_ADD_STD_MENU:
+    case STATE_TRAIN_AP_ACTIVE:
+      if (back) {
+        beepClick();
+        changeState(STATE_MAIN_MENU);
+      } else if (ok) {
+        beepClick();
+        changeState(STATE_TRAIN_CHOOSE_METHOD);
+        menuIndex = 0;
+      }
+      break;
+      
+    case STATE_TRAIN_CHOOSE_METHOD:
       if (up || down) {
         beepClick();
         menuIndex = (menuIndex == 0) ? 1 : 0;
       } else if (back) {
         beepClick();
-        changeState(STATE_MAIN_MENU);
+        changeState(STATE_TRAIN_AP_ACTIVE);
       } else if (ok) {
         beepClick();
         if (menuIndex == 0) {
-          changeState(STATE_ADD_STD_PRESET);
+          changeState(STATE_TRAIN_PRESET);
           presetIndex = 0;
         } else {
-          changeState(STATE_ADD_STD_MANUAL);
+          changeState(STATE_TRAIN_MANUAL);
           concDigitPos = 0;
           for (int i = 0; i < 5; i++) concDigits[i] = 0;
         }
       }
       break;
       
-    case STATE_ADD_STD_PRESET:
+    case STATE_TRAIN_PRESET:
       if (up) {
         beepClick();
         presetIndex = (presetIndex - 1 + NUM_PRESETS) % NUM_PRESETS;
@@ -2005,16 +2325,16 @@ void handleButtonPresses(bool up, bool down, bool ok, bool back) {
         presetIndex = (presetIndex + 1) % NUM_PRESETS;
       } else if (back) {
         beepClick();
-        changeState(STATE_ADD_STD_MENU);
+        changeState(STATE_TRAIN_CHOOSE_METHOD);
         menuIndex = 0;
       } else if (ok) {
         beepClick();
         manualConc = PRESETS[presetIndex];
-        startScan(STATE_ADD_STD_SCANNING);
+        startScan(STATE_TRAIN_SCANNING);
       }
       break;
       
-    case STATE_ADD_STD_MANUAL:
+    case STATE_TRAIN_MANUAL:
       if (up) {
         beepClick();
         concDigits[concDigitPos] = (concDigits[concDigitPos] + 1) % 10;
@@ -2026,7 +2346,7 @@ void handleButtonPresses(bool up, bool down, bool ok, bool back) {
         if (concDigitPos > 0) {
           concDigitPos--;
         } else {
-          changeState(STATE_ADD_STD_MENU);
+          changeState(STATE_TRAIN_CHOOSE_METHOD);
           menuIndex = 0;
         }
       } else if (ok) {
@@ -2035,40 +2355,65 @@ void handleButtonPresses(bool up, bool down, bool ok, bool back) {
           concDigitPos++;
         } else {
           manualConc = concDigits[0] * 100.0 + concDigits[1] * 10.0 + concDigits[2] + concDigits[3] * 0.1 + concDigits[4] * 0.01;
-          startScan(STATE_ADD_STD_SCANNING);
+          startScan(STATE_TRAIN_SCANNING);
         }
       }
       break;
       
-    case STATE_ADD_STD_DONE:
+    case STATE_TRAIN_SCAN_DONE:
       if (ok || back) {
         beepClick();
-        changeState(STATE_MAIN_MENU);
+        changeState(STATE_TRAIN_AP_ACTIVE);
       }
       break;
       
-    case STATE_MEASURE_SAMPLE_PROMPT:
+    case STATE_MODEL_FLASHING:
+      if (flashDone && (ok || back)) {
+        beepClick();
+        changeState(STATE_TRAIN_AP_ACTIVE);
+      }
+      break;
+      
+    case STATE_PREDICT_MODEL_SELECT:
+      if (showModelWarning) {
+        if (up || down || ok || back) {
+          beepClick();
+          showModelWarning = false;
+        }
+        break;
+      }
+      if (up || down) {
+        beepClick();
+        predictModelIndex = (predictModelIndex == 0) ? 1 : 0;
+      } else if (back) {
+        beepClick();
+        changeState(STATE_MAIN_MENU);
+      } else if (ok) {
+        if (predictModelIndex == 0 && !activeModel.loaded) {
+          beepError();
+          showModelWarning = true;
+        } else {
+          beepClick();
+          changeState(STATE_PREDICT_PROMPT);
+        }
+      }
+      break;
+      
+    case STATE_PREDICT_PROMPT:
       if (back) {
         beepClick();
         changeState(STATE_MAIN_MENU);
       } else if (ok) {
         beepClick();
-        startScan(STATE_MEASURE_SAMPLE_SCANNING);
+        startScan(STATE_PREDICT_SCANNING);
       }
       break;
       
-    case STATE_MEASURE_SAMPLE_RESULTS:
+    case STATE_PREDICT_RESULTS:
       if (up || down) {
         beepClick();
         resultPage = (resultPage + 1) % RESULT_PAGES;
       } else if (ok || back) {
-        beepClick();
-        changeState(STATE_MAIN_MENU);
-      }
-      break;
-      
-    case STATE_WIFI_PORTAL:
-      if (ok || back) {
         beepClick();
         changeState(STATE_MAIN_MENU);
       }
@@ -2223,9 +2568,27 @@ void setup() {
   server.on("/download_csv", HTTP_GET, handleDownloadCsv);
   server.on("/clear_data", HTTP_GET, handleClearData);
   server.on("/upload_model", HTTP_POST, handleRoot, handleUploadModel);
+  server.on("/delete_model", HTTP_POST, handleDeleteModel);
 
   beepWelcome();
   stateStartTime = millis();
+}
+
+void checkSystemHealth() {
+  uint32_t freeHeap = ESP.getFreeHeap();
+  if (freeHeap < 6144) {
+    Serial.printf("CRITICAL: Heap memory critically low (%u bytes)! Resetting system to prevent crash...\n", freeHeap);
+    delay(500);
+    ESP.restart();
+  }
+  
+  FSInfo fs_info;
+  if (LittleFS.info(fs_info)) {
+    size_t freeSpace = fs_info.totalBytes - fs_info.usedBytes;
+    if (freeSpace < 10240) {
+      Serial.printf("WARNING: LittleFS storage space low: %u bytes free!\n", freeSpace);
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2235,6 +2598,13 @@ void setup() {
 void loop() {
   if (wifiPortalActive) {
     server.handleClient();
+  }
+  
+  // Periodic memory and file system health check (every 5 seconds)
+  static unsigned long lastHealthCheck = 0;
+  if (millis() - lastHealthCheck >= 5000) {
+    lastHealthCheck = millis();
+    checkSystemHealth();
   }
   
   // Non-blocking status LED indicator
