@@ -8,7 +8,7 @@
  *    - Buzzer: 13
  *    - Responds to UART serial commands from the ESP8266 master.
  *
- *  KSEF 2026  |  Project 6
+ *  YSK 2026  |  Project 6
  * ============================================================
  */
 
@@ -26,6 +26,47 @@
 
 char rxBuf[48];
 uint8_t rxLen = 0;
+
+// ─── Rainbow Animation Variables & Helpers ──────────────────
+#define ANIM_STEP_MS 15 
+#define ANIM_SPEED 2    
+
+unsigned int animHue = 0; 
+unsigned long lastAnimStep = 0;
+
+void setRGB(byte r, byte g, byte b) {
+  analogWrite(RED_LED, 255 - r);
+  analogWrite(GREEN_LED, 255 - g);
+  analogWrite(BLUE_LED, 255 - b);
+}
+
+void hueToRGB(unsigned int hue, byte &r, byte &g, byte &b) {
+  unsigned int phase = hue / 256;
+  byte fade = hue % 256;
+
+  switch (phase) {
+    case 0: r = 255; g = fade; b = 0; break;
+    case 1: r = 255 - fade; g = 255; b = 0; break;
+    case 2: r = 0; g = 255; b = fade; break;
+    case 3: r = 0; g = 255 - fade; b = 255; break;
+    case 4: r = fade; g = 0; b = 255; break;
+    case 5: r = 255; g = 0; b = 255 - fade; break;
+    default: r = 0; g = 0; b = 0; break;
+  }
+}
+
+void updateAnimation() {
+  unsigned long now = millis();
+  if (now - lastAnimStep < ANIM_STEP_MS) return;
+  lastAnimStep = now;
+
+  byte r, g, b;
+  hueToRGB(animHue, r, g, b);
+  setRGB(r, g, b);
+
+  animHue += ANIM_SPEED;
+  if (animHue >= 1536) animHue = 0;
+}
 
 void playTone(unsigned int frequency, unsigned long duration_ms) {
   if (frequency == 0) {
@@ -64,6 +105,18 @@ void beepError() {
     playTone(200, 80);
     delay(20);
   }
+}
+
+void beepSuccess() {
+  playTone(1000, 50); delay(30);
+  playTone(1500, 50); delay(30);
+  playTone(2000, 50); delay(30);
+  playTone(2500, 100);
+}
+
+void beepStart() {
+  playTone(3000, 30); delay(10);
+  playTone(3000, 30);
 }
 
 void allLedsOff() {
@@ -162,6 +215,12 @@ void handleCommand(char* cmd) {
   else if (strncmp(cmd, "BEEP:ERROR", 10) == 0) {
     beepError();
   }
+  else if (strncmp(cmd, "BEEP:SUCCESS", 12) == 0) {
+    beepSuccess();
+  }
+  else if (strncmp(cmd, "BEEP:START", 10) == 0) {
+    beepStart();
+  }
 }
 
 void setup() {
@@ -175,6 +234,7 @@ void setup() {
 }
 
 void loop() {
+  updateAnimation();
   while (Serial.available() > 0) {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {

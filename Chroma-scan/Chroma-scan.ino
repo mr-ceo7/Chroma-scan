@@ -10,7 +10,7 @@
  *    - Running Edge AI model inference (Linear/MLP)
  *    - Commands the Arduino Nano slave driver to scan or beep.
  *
- *  KSEF 2026  |  Project 6
+ *  YSK 2026  |  Project 6
  * ============================================================
  */
 
@@ -782,7 +782,7 @@ const char HTTP_INDEX[] PROGMEM = R"raw(
     </div>
 
     <div class="footer">
-      KSEF 2026 Project 6 | Calibration & Edge Inference Portal
+      YSK 2026 Project 6 | Calibration & Edge Inference Portal
     </div>
   </div>
 

@@ -284,7 +284,7 @@ HTML_TEMPLATE = """
     {% endif %}
 
     <div class="footer">
-      KSEF 2026 Project 6 | Powered by Galvaniy Technologies
+      YSK 2026 Project 6 | Powered by Galvaniy Technologies
     </div>
   </div>
 
