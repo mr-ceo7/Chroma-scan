@@ -2,12 +2,25 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+import urllib.request
+
 # ReportLab imports
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.pdfgen import canvas
+
+def download_qr_code():
+    qr_path = "qr_code.png"
+    if not os.path.exists(qr_path):
+        print("Downloading QR code...")
+        try:
+            url = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=https://chroma-train-server.onrender.com"
+            urllib.request.urlretrieve(url, qr_path)
+            print("QR code downloaded successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to download QR code: {e}")
 
 # ═══════════════════════════════════════════════════════════
 #  DIAGRAM GENERATION
@@ -503,6 +516,19 @@ def build_pdf(filename="Chroma_Scan_Technical_Manual.pdf"):
     """
     story.append(Paragraph(op_p3, body_style))
     
+    op_p3_cloud = """
+    <b>Cloud AI Compiler Integration:</b><br/>
+    If you do not wish to run the training server locally, you can use the official hosted cloud instance at: 
+    <font color="#2563eb"><u>https://chroma-train-server.onrender.com</u></font><br/>
+    Scan the QR code below with a smartphone or tablet to access the studio directly:
+    """
+    story.append(KeepTogether([
+        Paragraph(op_p3_cloud, body_style),
+        Spacer(1, 6),
+        Image("qr_code.png", width=90, height=90),
+        Spacer(1, 10)
+    ]))
+    
     # --- SECTION 4.4 ---
     story.append(Paragraph("4.4 Running Edge AI Inference", h2_style))
     op_p4 = """
@@ -521,5 +547,6 @@ def build_pdf(filename="Chroma_Scan_Technical_Manual.pdf"):
     print("PDF build complete!")
 
 if __name__ == "__main__":
+    download_qr_code()
     generate_diagrams()
     build_pdf()
