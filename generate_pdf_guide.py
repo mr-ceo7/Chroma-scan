@@ -150,7 +150,15 @@ class NumberedCanvas(canvas.Canvas):
 
     def draw_header_footer(self, page_count):
         if self._pageNumber == 1:
-            return  # Skip cover page
+            self.saveState()
+            self.setFont("Helvetica-Bold", 10)
+            self.setFillColor(colors.HexColor("#1e3a8a"))
+            self.drawCentredString(306, 45, "GALVANIY TECHNOLOGIES")
+            self.setFont("Helvetica", 8)
+            self.setFillColor(colors.HexColor("#475569"))
+            self.drawCentredString(306, 32, "All Rights Reserved © 2026")
+            self.restoreState()
+            return
             
         self.saveState()
         self.setFont("Helvetica-Bold", 8)
@@ -168,7 +176,7 @@ class NumberedCanvas(canvas.Canvas):
         
         # Footer
         self.line(54, 52, 558, 52)
-        self.drawString(54, 40, "YSK 2026 Project 6 — Galvaniy Technologies")
+        self.drawString(54, 40, "GALVANIY TECHNOLOGIES | YSK 2026 Project 6")
         page_text = f"Page {self._pageNumber} of {page_count}"
         self.drawRightString(558, 40, page_text)
         
@@ -300,7 +308,9 @@ def build_pdf(filename="Chroma_Scan_Technical_Manual.pdf"):
     story.append(Paragraph("CHROMA-SCAN<br/>SPECTROPHOTOMETER", title_style))
     story.append(Paragraph("Scientific Principles, Embedded System Architecture, Edge AI Modeling, and Complete Operations Manual", subtitle_style))
     
-    story.append(Spacer(1, 200))
+    story.append(Spacer(1, 15))
+    story.append(Image("chromascan_device.png", width=220, height=220))
+    story.append(Spacer(1, 25))
     
     # Metadata Block
     meta_text = """
