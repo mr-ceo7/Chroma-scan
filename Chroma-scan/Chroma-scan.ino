@@ -1511,57 +1511,47 @@ void renderState() {
       display.setTextColor(SSD1306_WHITE);
       
       if (elapsed < 2000) {
-        // --- PHASE 1: Galvaniy Technologies ---
-        // Pulsing background rings
-        int radius = 4 + (elapsed / 40) % 18;
-        display.drawCircle(64, 20, radius, SSD1306_WHITE);
-        display.drawCircle(64, 20, (radius + 8) % 22 + 4, SSD1306_WHITE);
-        
-        // Logo shape
-        display.drawTriangle(64, 8, 52, 20, 76, 20, SSD1306_WHITE);
-        display.drawTriangle(64, 32, 52, 20, 76, 20, SSD1306_WHITE);
-        display.fillCircle(64, 20, 2, SSD1306_WHITE);
-        
-        // Text labels centered
-        display.setTextSize(1);
-        display.setCursor(64 - (8 * 3), 42); // "GALVANIY" is 8 chars
-        display.print(F("GALVANIY"));
-        display.setCursor(64 - (12 * 3), 51); // "TECHNOLOGIES" is 12 chars
-        display.print(F("TECHNOLOGIES"));
-      } else {
-        // --- PHASE 2: Chroma Scan Intro ---
-        // Sliding laser line revelator
-        int laserY = 12 + ((elapsed - 2000) / 15) % 36;
-        display.drawFastHLine(0, laserY, 128, SSD1306_WHITE);
-        
-        // Custom branding
+        // Welcome Screen 1: Company Name
+        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
         display.setTextSize(2);
-        display.setCursor(14, 15);
-        display.print(F("CHROMA"));
+        display.setCursor((SCREEN_WIDTH - 96) / 2, 12);
+        display.print(F("Galvaniy"));
         
         display.setTextSize(1);
-        display.setCursor(88, 15);
-        display.print(F("SCAN"));
-        display.setCursor(88, 24);
-        display.print(F("SYSTEM"));
+        display.setCursor((SCREEN_WIDTH - 72) / 2, 38);
+        display.print(F("Technologies"));
+      } 
+      else if (elapsed < 4000) {
+        // Welcome Screen 2: Product Name
+        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+        display.setTextSize(2);
+        display.setCursor((SCREEN_WIDTH - 72) / 2, 10);
+        display.print(F("Chroma"));
+        display.setCursor((SCREEN_WIDTH - 48) / 2, 30);
+        display.print(F("Scan"));
         
-        // Sub-bar separator
-        display.drawFastHLine(14, 35, 100, SSD1306_WHITE);
+        display.setTextSize(1);
+        display.setCursor((SCREEN_WIDTH - 24) / 2, 52);
+        display.print(F("v1.0"));
+      } 
+      else {
+        // Welcome Screen 3: Ready prompt
+        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
         
-        // Edge AI subtitle
-        display.setCursor(14, 40);
-        display.print(F("Edge AI Spectrometry"));
+        display.setTextSize(1);
+        display.setCursor((SCREEN_WIDTH - 96) / 2, 16);
+        display.print(F("Chroma-Scan Ready"));
         
-        // Rotating molecules/dots for premium feel
-        int dotAngle = (elapsed / 10) % 360;
-        int dx = (int)(cos(dotAngle * 3.1415 / 180.0) * 8.0);
-        int dy = (int)(sin(dotAngle * 3.1415 / 180.0) * 8.0);
-        display.fillCircle(112 + dx, 22 + dy, 2, SSD1306_WHITE);
-        display.fillCircle(112 - dx, 22 - dy, 2, SSD1306_WHITE);
+        display.setTextSize(2);
+        display.setCursor((SCREEN_WIDTH - 96) / 2, 32);
+        display.print(F("Press OK"));
         
-        // OK Skip Indicator
-        display.setCursor(16, 54);
-        display.print(F("[OK] Skip Intro"));
+        // Blink indicator
+        if ((millis() / 500) % 2 == 0) {
+          display.setTextSize(1);
+          display.setCursor((SCREEN_WIDTH - 66) / 2, 52);
+          display.print(F("to begin..."));
+        }
       }
       break;
     }
@@ -2252,13 +2242,7 @@ void loop() {
   static bool ledState = false;
   unsigned long currentMillis = millis();
 
-  // Auto-transition from welcome/splash screen to main menu after 4.5 seconds
-  if (currentState == STATE_WELCOME) {
-    if (currentMillis - stateStartTime >= 4500) {
-      changeState(STATE_MAIN_MENU);
-      menuIndex = 0;
-    }
-  }
+
 
   if (wifiPortalActive) {
     if (currentMillis - lastLedBlink >= 100) {
